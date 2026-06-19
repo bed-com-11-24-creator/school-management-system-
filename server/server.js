@@ -22,9 +22,9 @@ app.use(express.json({ limit: '10mb' }));
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  
+
   if (!token) return res.status(401).json({ error: 'unauthorized', message: 'Access token missing' });
-  
+
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ error: 'forbidden', message: 'Invalid or expired token' });
     req.user = user;
@@ -38,15 +38,15 @@ function authenticateToken(req, res, next) {
 async function checkLockoutGate(req, res, next) {
   try {
     const { school_id, role } = req.user;
-    
+
     // Fetch lock status of the school
     const schoolRes = await query('SELECT is_locked, balance_due FROM schools WHERE id = $1', [school_id]);
     if (schoolRes.rowCount === 0) {
       return res.status(404).json({ error: 'school_not_found', message: 'School not found' });
     }
-    
+
     const school = schoolRes.rows[0];
-    
+
     // Lock gate applies if is_locked is true AND user is NOT an admin
     if (school.is_locked && role !== 'admin') {
       return res.status(402).json({
@@ -55,7 +55,7 @@ async function checkLockoutGate(req, res, next) {
         balance_due: school.balance_due
       });
     }
-    
+
     next();
   } catch (err) {
     console.error('Lockout gate middleware error:', err);
@@ -73,7 +73,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!email || !password) {
     return res.status(400).json({ error: 'bad_request', message: 'Email and password required' });
   }
-  
+
   try {
     const userRes = await query(
       `SELECT u.*, s.name as school_name, s.is_locked, s.balance_due, s.logo, s.letterhead, s.academic_headers
@@ -82,25 +82,25 @@ app.post('/api/auth/login', async (req, res) => {
        WHERE u.email = $1`,
       [email.toLowerCase().trim()]
     );
-    
+
     if (userRes.rowCount === 0) {
       return res.status(401).json({ error: 'auth_failed', message: 'Invalid email or password' });
     }
-    
+
     const user = userRes.rows[0];
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
-    
+
     if (!passwordMatch) {
       return res.status(401).json({ error: 'auth_failed', message: 'Invalid email or password' });
     }
-    
+
     // Create JWT Token
     const token = jwt.sign(
       { id: user.id, school_id: user.school_id, role: user.role, email: user.email },
       JWT_SECRET,
       { expiresIn: '12h' }
     );
-    
+
     res.json({
       token,
       user: {
@@ -122,7 +122,7 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (err) {
     console.error('Login error:', err);
-    res.status(500).json({ error: 'server_error', message: 'Login failed' });
+    res.status(500).json({ error: 'serverError', message: 'Login failed' });
   }
 });
 
@@ -132,20 +132,20 @@ app.post('/api/auth/register-teacher', authenticateToken, async (req, res) => {
   if (adminRole !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Only Administrators can register teachers' });
   }
-  
+
   const { email, password, full_name, role, sex } = req.body;
   if (!email || !password || !full_name || !role) {
     return res.status(400).json({ error: 'bad_request', message: 'All fields are required' });
   }
-  
+
   if (role !== 'teacher' && role !== 'headteacher') {
     return res.status(400).json({ error: 'bad_request', message: 'Can only register teachers or headteachers' });
   }
-  
+
   try {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
-    
+
     // PostgreSQL unique partial index constraints will throw if trying to add secondary admin/headteacher
     const insertRes = await query(
       `INSERT INTO users (school_id, email, password_hash, role, full_name, sex)
@@ -153,7 +153,7 @@ app.post('/api/auth/register-teacher', authenticateToken, async (req, res) => {
        RETURNING id, email, role, full_name, sex`,
       [school_id, email.toLowerCase().trim(), passwordHash, role, full_name, sex || 'M']
     );
-    
+
     res.status(201).json({
       message: 'User registered successfully',
       user: insertRes.rows[0]
@@ -163,8 +163,8 @@ app.post('/api/auth/register-teacher', authenticateToken, async (req, res) => {
     if (err.code === '23505') { // Unique violation
       return res.status(409).json({
         error: 'conflict',
-        message: err.message.includes('unique_headteacher_per_school') 
-          ? 'Rigid Constraint: A Headteacher account already exists for this school!' 
+        message: err.message.includes('unique_headteacher_per_school')
+          ? 'Rigid Constraint: A Headteacher account already exists for this school!'
           : 'Email already in use'
       });
     }
@@ -198,9 +198,9 @@ app.post('/api/school/branding', authenticateToken, async (req, res) => {
   if (role !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Only Master Admin can modify branding' });
   }
-  
+
   const { name, logo, letterhead, academic_headers } = req.body;
-  
+
   try {
     await query(
       `UPDATE schools 
@@ -227,7 +227,7 @@ app.get('/api/billing/status', authenticateToken, async (req, res) => {
   if (role !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Access denied' });
   }
-  
+
   try {
     const schoolRes = await query(
       'SELECT student_count, balance_due, payment_status, is_locked FROM schools WHERE id = $1',
@@ -253,25 +253,25 @@ app.post('/api/billing/pay', authenticateToken, async (req, res) => {
   if (role !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Access denied' });
   }
-  
+
   const { gateway, phone_number, amount } = req.body;
   if (!gateway || !phone_number || !amount) {
     return res.status(400).json({ error: 'bad_request', message: 'Gateway, phone number, and amount are required' });
   }
-  
+
   try {
-    const ref = 'TX-' + gateway.toUpperCase().substring(0,3) + '-' + Math.floor(100000 + Math.random() * 900000);
-    
+    const ref = 'TX-' + gateway.toUpperCase().substring(0, 3) + '-' + Math.floor(100000 + Math.random() * 900000);
+
     // Begin database transaction
     await query('BEGIN');
-    
+
     // Insert simulated transaction
     await query(
       `INSERT INTO transactions (school_id, amount, gateway, phone_number, transaction_ref, status)
        VALUES ($1, $2, $3, $4, $5, 'SUCCESS')`,
       [school_id, amount, gateway, phone_number, ref]
     );
-    
+
     // Update school table - Clear balance and unlock immediately
     await query(
       `UPDATE schools 
@@ -282,9 +282,9 @@ app.post('/api/billing/pay', authenticateToken, async (req, res) => {
        WHERE id = $1`,
       [school_id]
     );
-    
+
     await query('COMMIT');
-    
+
     res.json({
       success: true,
       message: 'Payment completed successfully!',
@@ -334,7 +334,7 @@ app.post('/api/students', authenticateToken, checkLockoutGate, async (req, res) 
   if (role !== 'admin' && role !== 'teacher') {
     return res.status(403).json({ error: 'forbidden', message: 'Unauthorized role to add students' });
   }
-  
+
   const { full_name, class_name, parent_name, parent_phone, sex, disability, amount_paid } = req.body;
   if (!full_name || !class_name) {
     return res.status(400).json({ error: 'bad_request', message: 'Student name and class are required' });
@@ -342,10 +342,10 @@ app.post('/api/students', authenticateToken, checkLockoutGate, async (req, res) 
 
   // Generate unique roll number
   const roll_number = 'STD-' + new Date().getFullYear() + '-' + Math.floor(10000 + Math.random() * 90000);
-  
+
   try {
     await query('BEGIN');
-    
+
     // Insert student
     const studentRes = await query(
       `INSERT INTO students (school_id, full_name, roll_number, class_name, sex, disability, parent_name, parent_phone)
@@ -353,7 +353,7 @@ app.post('/api/students', authenticateToken, checkLockoutGate, async (req, res) 
        RETURNING *`,
       [school_id, full_name, roll_number, class_name, sex || 'M', disability || null, parent_name, parent_phone]
     );
-    
+
     const student = studentRes.rows[0];
 
     // Get active term
@@ -376,7 +376,7 @@ app.post('/api/students', authenticateToken, checkLockoutGate, async (req, res) 
        RETURNING *`,
       [student.id, school_id, term, feeAmount, paid, balance, feeStatus]
     );
-    
+
     // Increment student count in school
     const countRes = await query(
       `UPDATE schools 
@@ -389,9 +389,9 @@ app.post('/api/students', authenticateToken, checkLockoutGate, async (req, res) 
        RETURNING student_count, balance_due`,
       [school_id]
     );
-    
+
     await query('COMMIT');
-    
+
     res.status(201).json({
       student: {
         ...student,
@@ -418,20 +418,20 @@ app.delete('/api/students/:id', authenticateToken, checkLockoutGate, async (req,
   if (role !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Only Administrators can delete students' });
   }
-  
+
   const studentId = req.params.id;
-  
+
   try {
     await query('BEGIN');
-    
+
     // Delete student
     const deleteRes = await query('DELETE FROM students WHERE id = $1 AND school_id = $2 RETURNING id', [studentId, school_id]);
-    
+
     if (deleteRes.rowCount === 0) {
       await query('ROLLBACK');
       return res.status(404).json({ error: 'not_found', message: 'Student not found' });
     }
-    
+
     // Decrement student count and update balance due
     const countRes = await query(
       `UPDATE schools 
@@ -444,9 +444,9 @@ app.delete('/api/students/:id', authenticateToken, checkLockoutGate, async (req,
        RETURNING student_count, balance_due`,
       [school_id]
     );
-    
+
     await query('COMMIT');
-    
+
     res.json({
       message: 'Student deleted successfully',
       billing: countRes.rows[0]
@@ -464,9 +464,9 @@ app.delete('/api/students/:id', authenticateToken, checkLockoutGate, async (req,
 app.get('/api/attendance', authenticateToken, checkLockoutGate, async (req, res) => {
   const { school_id } = req.user;
   const { date } = req.query;
-  
+
   if (!date) return res.status(400).json({ error: 'bad_request', message: 'Date parameter required' });
-  
+
   try {
     const attendanceRes = await query(
       `SELECT a.*, s.full_name, s.roll_number, s.class_name
@@ -487,19 +487,19 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
   if (role !== 'teacher') {
     return res.status(403).json({ error: 'forbidden', message: 'Only Teachers can submit daily registers' });
   }
-  
+
   const { student_id, date, status } = req.body;
   if (!student_id || !date || !status) {
     return res.status(400).json({ error: 'bad_request', message: 'student_id, date, and status are required' });
   }
-  
+
   try {
     // Check if student belongs to this school
     const studentCheck = await query('SELECT full_name, parent_phone, parent_name FROM students WHERE id = $1 AND school_id = $2', [student_id, school_id]);
     if (studentCheck.rowCount === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student not found in this school' });
     }
-    
+
     // UPSERT attendance
     await query(
       `INSERT INTO attendance (student_id, date, status, marked_by)
@@ -508,7 +508,7 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
        DO UPDATE SET status = EXCLUDED.status, marked_by = EXCLUDED.marked_by`,
       [student_id, date, status, userId]
     );
-    
+
     // Automated trigger: if status is ABSENT, check config and queue SMS
     if (status === 'absent') {
       const configRes = await query(
@@ -516,22 +516,22 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
          WHERE school_id = $1 AND template_type = 'attendance_alert'`,
         [school_id]
       );
-      
+
       const stud = studentCheck.rows[0];
       if (configRes.rowCount > 0 && configRes.rows[0].is_enabled && stud.parent_phone) {
         const conf = configRes.rows[0];
-        
+
         // Fetch school name
         const schoolRes = await query('SELECT name FROM schools WHERE id = $1', [school_id]);
         const schoolName = schoolRes.rows[0].name;
-        
+
         // Format text
         let message = conf.message_template
           .replace(/{parent_name}/g, stud.parent_name || 'Parent')
           .replace(/{student_name}/g, stud.full_name)
           .replace(/{school_name}/g, schoolName)
           .replace(/{date}/g, date);
-          
+
         // Save to outbox
         await query(
           `INSERT INTO sent_notifications (school_id, student_id, recipient_phone, message_content, channel, status)
@@ -540,7 +540,7 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
         );
       }
     }
-    
+
     res.json({ success: true, message: 'Attendance marked successfully' });
   } catch (err) {
     console.error('Mark attendance error:', err);
@@ -554,9 +554,9 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
 app.get('/api/scores', authenticateToken, checkLockoutGate, async (req, res) => {
   const { school_id } = req.user;
   const { term, class_name } = req.query;
-  
+
   if (!term) return res.status(400).json({ error: 'bad_request', message: 'Term is required' });
-  
+
   try {
     let q = `
       SELECT r.*, s.full_name, s.roll_number, s.class_name
@@ -565,12 +565,12 @@ app.get('/api/scores', authenticateToken, checkLockoutGate, async (req, res) => 
       WHERE s.school_id = $1 AND r.term = $2
     `;
     const params = [school_id, term];
-    
+
     if (class_name) {
       q += ` AND s.class_name = $3`;
       params.push(class_name);
     }
-    
+
     const scoresRes = await query(q, params);
     res.json(scoresRes.rows);
   } catch (err) {
@@ -585,19 +585,19 @@ app.post('/api/scores', authenticateToken, checkLockoutGate, async (req, res) =>
   if (role !== 'teacher') {
     return res.status(403).json({ error: 'forbidden', message: 'Only teachers can input scores' });
   }
-  
+
   const { student_id, term, subject, score, remarks } = req.body;
   if (!student_id || !term || !subject || score === undefined) {
     return res.status(400).json({ error: 'bad_request', message: 'student_id, term, subject, and score are required' });
   }
-  
+
   try {
     // Verify student belongs to this school
     const studentCheck = await query('SELECT full_name FROM students WHERE id = $1 AND school_id = $2', [student_id, school_id]);
     if (studentCheck.rowCount === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student not found in school' });
     }
-    
+
     // UPSERT score entry
     const upsertRes = await query(
       `INSERT INTO report_cards (student_id, term, subject, score, teacher_remarks, headteacher_approved)
@@ -607,7 +607,7 @@ app.post('/api/scores', authenticateToken, checkLockoutGate, async (req, res) =>
        RETURNING *`,
       [student_id, term, subject, score, remarks]
     );
-    
+
     res.json({ success: true, report: upsertRes.rows[0] });
   } catch (err) {
     console.error('Enter score error:', err);
@@ -621,7 +621,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
   if (role !== 'headteacher') {
     return res.status(403).json({ error: 'forbidden', message: 'Only Headteacher can approve report cards' });
   }
-  
+
   const { report_ids, approve_all, term } = req.body;
   let targetIds = report_ids;
 
@@ -639,11 +639,11 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
       return res.status(500).json({ error: 'server_error', message: 'Failed to fetch pending report cards' });
     }
   }
-  
+
   if (!targetIds || !Array.isArray(targetIds) || targetIds.length === 0) {
     return res.json({ success: true, message: 'No report cards to approve' });
   }
-  
+
   try {
     await query(
       `UPDATE report_cards 
@@ -653,7 +653,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
        WHERE id = ANY($2::uuid[])`,
       [userId, targetIds]
     );
-    
+
     // Trigger Notifications for approved reports
     // For each student who has newly approved report cards, construct report summary and queue SMS/WhatsApp
     for (const rid of report_ids) {
@@ -664,7 +664,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
          WHERE r.id = $1`,
         [rid]
       );
-      
+
       if (repRes.rowCount > 0) {
         const rep = repRes.rows[0];
         if (rep.parent_phone) {
@@ -673,15 +673,15 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
              WHERE school_id = $1 AND template_type = 'report_card_ready'`,
             [rep.school_id]
           );
-          
+
           if (configRes.rowCount > 0 && configRes.rows[0].is_enabled) {
             const conf = configRes.rows[0];
             const schoolRes = await query('SELECT name FROM schools WHERE id = $1', [rep.school_id]);
             const schoolName = schoolRes.rows[0].name;
-            
+
             const scoresDetails = `${rep.subject}: ${rep.score}% (${rep.teacher_remarks || 'No remarks'})`;
             const paymentLink = `http://localhost:5173/pay/student/${rep.student_id}`;
-            
+
             let message = conf.message_template
               .replace(/{parent_name}/g, rep.parent_name || 'Parent')
               .replace(/{student_name}/g, rep.full_name)
@@ -689,7 +689,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
               .replace(/{academic_header}/g, rep.term)
               .replace(/{score_details}/g, scoresDetails)
               .replace(/{payment_link}/g, paymentLink);
-              
+
             await query(
               `INSERT INTO sent_notifications (school_id, student_id, recipient_phone, message_content, channel, status)
                VALUES ($1, $2, $3, $4, $5, 'SENT')`,
@@ -699,7 +699,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
         }
       }
     }
-    
+
     res.json({ success: true, message: 'Reports approved and parent alerts sent' });
   } catch (err) {
     console.error('Approve reports error:', err);
@@ -726,12 +726,12 @@ app.post('/api/notifications/config', authenticateToken, checkLockoutGate, async
   if (role !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Only Master Admin can modify notification config' });
   }
-  
+
   const configs = req.body; // Expect array of configurations
   if (!Array.isArray(configs)) {
     return res.status(400).json({ error: 'bad_request', message: 'Array of configurations required' });
   }
-  
+
   try {
     await query('BEGIN');
     for (const c of configs) {
@@ -761,7 +761,7 @@ app.get('/api/notifications/outbox', authenticateToken, checkLockoutGate, async 
   if (role !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Access denied' });
   }
-  
+
   try {
     const outboxRes = await query(
       `SELECT n.*, s.full_name as student_name
@@ -784,55 +784,55 @@ app.post('/api/notifications/send', authenticateToken, checkLockoutGate, async (
   if (role !== 'admin') {
     return res.status(403).json({ error: 'forbidden', message: 'Only Administrators can manually fire alert broadcasts' });
   }
-  
+
   const { template_type, class_name } = req.body;
   if (!template_type) {
     return res.status(400).json({ error: 'bad_request', message: 'template_type is required' });
   }
-  
+
   try {
     // 1. Fetch template config
     const configRes = await query(
       'SELECT message_template, channel, is_enabled FROM notifications_config WHERE school_id = $1 AND template_type = $2',
       [school_id, template_type]
     );
-    
+
     if (configRes.rowCount === 0 || !configRes.rows[0].is_enabled) {
       return res.status(404).json({ error: 'disabled_or_missing', message: 'Template config is either disabled or not configured.' });
     }
-    
+
     const config = configRes.rows[0];
-    
+
     // 2. Fetch target students
     let studQuery = 'SELECT id, full_name, parent_name, parent_phone FROM students WHERE school_id = $1';
     const params = [school_id];
-    
+
     if (class_name) {
       studQuery += ' AND class_name = $2';
       params.push(class_name);
     }
-    
+
     const studentsRes = await query(studQuery, params);
     if (studentsRes.rowCount === 0) {
       return res.json({ success: true, count: 0, message: 'No students found in target audience' });
     }
-    
+
     // Fetch school metadata for variables
     const schoolRes = await query('SELECT name, balance_due FROM schools WHERE id = $1', [school_id]);
     const school = schoolRes.rows[0];
-    
+
     let sentCount = 0;
     for (const stud of studentsRes.rows) {
       if (stud.parent_phone) {
         const paymentLink = `http://localhost:5173/pay/student/${stud.id}`;
-        
+
         let message = config.message_template
           .replace(/{parent_name}/g, stud.parent_name || 'Parent')
           .replace(/{student_name}/g, stud.full_name)
           .replace(/{school_name}/g, school.name)
           .replace(/{balance_due}/g, '500') // Individual student term fee
           .replace(/{payment_link}/g, paymentLink);
-          
+
         await query(
           `INSERT INTO sent_notifications (school_id, student_id, recipient_phone, message_content, channel, status)
            VALUES ($1, $2, $3, $4, $5, 'SENT')`,
@@ -841,7 +841,7 @@ app.post('/api/notifications/send', authenticateToken, checkLockoutGate, async (
         sentCount++;
       }
     }
-    
+
     res.json({ success: true, count: sentCount, message: `Dispatched ${sentCount} notifications successfully.` });
   } catch (err) {
     console.error('Trigger notifications error:', err);
@@ -857,7 +857,7 @@ app.post('/api/timetable/generate', authenticateToken, checkLockoutGate, async (
   if (!classes || !subjects || !days || !slotsPerDay) {
     return res.status(400).json({ error: 'bad_request', message: 'Missing parameters (classes, subjects, days, slotsPerDay)' });
   }
-  
+
   try {
     const result = generateTimetable({
       classes,
@@ -865,7 +865,7 @@ app.post('/api/timetable/generate', authenticateToken, checkLockoutGate, async (
       days,
       slotsPerDay: parseInt(slotsPerDay, 10)
     });
-    
+
     if (result.success) {
       res.json(result);
     } else {
@@ -891,11 +891,11 @@ app.get('/api/parent/student/:id', async (req, res) => {
        WHERE s.id = $1`,
       [studentId]
     );
-    
+
     if (studRes.rowCount === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student record not found' });
     }
-    
+
     res.json({
       student: studRes.rows[0],
       term_fee: 500.00 // Malawi School licensing fee per student per term
@@ -911,27 +911,27 @@ app.post('/api/parent/pay', async (req, res) => {
   if (!student_id || !phone_number || !amount || !gateway) {
     return res.status(400).json({ error: 'bad_request', message: 'Student ID, phone number, amount, and gateway required' });
   }
-  
+
   try {
     await query('BEGIN');
-    
+
     // Fetch student info
     const studRes = await query('SELECT school_id, full_name FROM students WHERE id = $1', [student_id]);
     if (studRes.rowCount === 0) {
       await query('ROLLBACK');
       return res.status(404).json({ error: 'not_found', message: 'Student not found' });
     }
-    
+
     const schoolId = studRes.rows[0].school_id;
-    const ref = 'TX-PRNT-' + gateway.toUpperCase().substring(0,3) + '-' + Math.floor(100000 + Math.random() * 900000);
-    
+    const ref = 'TX-PRNT-' + gateway.toUpperCase().substring(0, 3) + '-' + Math.floor(100000 + Math.random() * 900000);
+
     // Record student transaction
     await query(
       `INSERT INTO transactions (school_id, amount, gateway, phone_number, transaction_ref, status)
        VALUES ($1, $2, $3, $4, $5, 'SUCCESS')`,
       [schoolId, amount, gateway, phone_number, ref]
     );
-    
+
     // Update school outstanding balance (parent pays fee for this student, subtracting K500 from school debt)
     await query(
       `UPDATE schools 
@@ -942,9 +942,9 @@ app.post('/api/parent/pay', async (req, res) => {
        WHERE id = $1`,
       [schoolId]
     );
-    
+
     await query('COMMIT');
-    
+
     res.json({
       success: true,
       message: `Successfully processed fees payment for ${studRes.rows[0].full_name}.`,
@@ -963,13 +963,13 @@ app.post('/api/parent/pay', async (req, res) => {
 app.post('/api/sync', authenticateToken, checkLockoutGate, async (req, res) => {
   const { id: userId, school_id } = req.user;
   const { operations } = req.body; // Array of operations: { type: 'attendance'|'score', data: {...} }
-  
+
   if (!operations || !Array.isArray(operations)) {
     return res.status(400).json({ error: 'bad_request', message: 'Operations array is required' });
   }
-  
+
   const results = { succeeded: 0, failed: 0, errors: [] };
-  
+
   for (const op of operations) {
     try {
       if (op.type === 'attendance') {
@@ -1010,7 +1010,7 @@ app.post('/api/sync', authenticateToken, checkLockoutGate, async (req, res) => {
       results.errors.push(`DB error during sync operation: ${err.message}`);
     }
   }
-  
+
   res.json({
     message: 'Synchronization processed',
     sync_results: results
