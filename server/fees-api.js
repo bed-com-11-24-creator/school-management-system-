@@ -29,21 +29,21 @@ router.get('/api/fees/students', async (req, res) => {
         COALESCE(sf.amount_paid, 0) as amount_paid,
         COALESCE(sf.balance, 0) as balance,
         COALESCE(sf.status, 'no_fees') as fee_status,
-        COALESCE(sf.term, $1) as current_term,
-        STRING_AGG(DISTINCT subj.subject_name, ', ') as subjects
+        COALESCE(sf.term, ?) as current_term,
+        GROUP_CONCAT(DISTINCT subj.subject_name ORDER BY subj.subject_name SEPARATOR ', ') as subjects
       FROM students s
-      LEFT JOIN student_fees sf ON s.id = sf.student_id AND sf.term = $1
+      LEFT JOIN student_fees sf ON s.id = sf.student_id AND sf.term = ?
       LEFT JOIN classes c ON s.class_name = c.class_name AND s.school_id = c.school_id
       LEFT JOIN class_subjects cs ON c.id = cs.class_id
       LEFT JOIN subjects subj ON cs.subject_id = subj.id
-      WHERE s.school_id = $2 AND s.status = 'active'
+      WHERE s.school_id = ? AND s.status = 'active'
     `;
 
     const params = [term || 'Term 1 2026', school_id];
 
     if (search) {
-      sql += ` AND (s.full_name ILIKE $3 OR s.roll_number ILIKE $3)`;
-      params.push(`%${search}%`);
+      sql += ` AND (LOWER(s.full_name) LIKE LOWER(?) OR LOWER(s.roll_number) LIKE LOWER(?))`;
+      params.push(`%${search.toLowerCase()}%`, `%${search.toLowerCase()}%`);
     }
 
     sql += ` GROUP BY s.id, s.full_name, s.roll_number, s.class_name, s.parent_phone, s.status, s.sex, s.disability,
@@ -75,21 +75,24 @@ router.post('/api/fees/set', adminOnly, async (req, res) => {
   }
 
   try {
-    const studentRes = await query('SELECT id FROM students WHERE id = $1 AND school_id = $2', [student_id, school_id]);
-    if (studentRes.rowCount === 0) {
+    const studentRes = await query('SELECT id FROM students WHERE id = ? AND school_id = ?', [student_id, school_id]);
+    if (studentRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student not found' });
     }
 
-    const result = await query(
+    await query(
       `INSERT INTO student_fees (student_id, school_id, term, fee_amount, balance, status)
-       VALUES ($1, $2, $3, $4, $5, 'pending')
-       ON CONFLICT (student_id, term) 
-       DO UPDATE SET fee_amount = $4, balance = $5, status = 'pending', updated_at = CURRENT_TIMESTAMP
-       RETURNING *`,
-      [student_id, school_id, term, fee_amount, fee_amount]
+       VALUES (?, ?, ?, ?, ?, 'pending')
+       ON DUPLICATE KEY UPDATE fee_amount = ?, balance = ?, status = 'pending', updated_at = CURRENT_TIMESTAMP`,
+      [student_id, school_id, term, fee_amount, fee_amount, fee_amount, fee_amount]
     );
 
-    res.json({ message: 'Fee set successfully', fee: result.rows[0] });
+    const feeRes = await query(
+      'SELECT * FROM student_fees WHERE student_id = ? AND term = ? AND school_id = ?',
+      [student_id, term, school_id]
+    );
+
+    res.json({ message: 'Fee set successfully', fee: feeRes.rows[0] });
   } catch (err) {
     console.error('Set fee error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
@@ -107,11 +110,11 @@ router.post('/api/fees/payment', adminOnly, async (req, res) => {
 
   try {
     const feeRes = await query(
-      'SELECT * FROM student_fees WHERE student_id = $1 AND term = $2 AND school_id = $3',
+      'SELECT * FROM student_fees WHERE student_id = ? AND term = ? AND school_id = ?',
       [student_id, term, school_id]
     );
 
-    if (feeRes.rowCount === 0) {
+    if (feeRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Fee record not found' });
     }
 
@@ -120,15 +123,19 @@ router.post('/api/fees/payment', adminOnly, async (req, res) => {
     const newBalance = parseFloat(fee.fee_amount) - newPaid;
     const status = newBalance <= 0 ? 'paid' : 'partial';
 
-    const result = await query(
+    await query(
       `UPDATE student_fees 
-       SET amount_paid = $1, balance = $2, status = $3, updated_at = CURRENT_TIMESTAMP
-       WHERE student_id = $4 AND term = $5 AND school_id = $6
-       RETURNING *`,
+       SET amount_paid = ?, balance = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE student_id = ? AND term = ? AND school_id = ?`,
       [newPaid, newBalance, status, student_id, term, school_id]
     );
 
-    res.json({ message: 'Payment recorded', fee: result.rows[0] });
+    const updatedFeeRes = await query(
+      'SELECT * FROM student_fees WHERE student_id = ? AND term = ? AND school_id = ?',
+      [student_id, term, school_id]
+    );
+
+    res.json({ message: 'Payment recorded', fee: updatedFeeRes.rows[0] });
   } catch (err) {
     console.error('Record payment error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
@@ -152,9 +159,8 @@ router.post('/api/fees/reminder-config', adminOnly, async (req, res) => {
     await query(
       `INSERT INTO notifications_config 
        (school_id, template_type, message_template, time_limit_days, channel, is_enabled)
-       VALUES ($1, 'fees_reminder', $2, $3, $4, $5)
-       ON CONFLICT (school_id, template_type)
-       DO UPDATE SET message_template = $2, time_limit_days = $3, channel = $4, is_enabled = $5`,
+       VALUES (?, 'fees_reminder', ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE message_template = ?, time_limit_days = ?, channel = ?, is_enabled = ?`,
       [school_id, message_template, time_limit_days, channel || 'sms', is_enabled !== false]
     );
 
@@ -172,7 +178,7 @@ router.get('/api/fees/reminder-config', adminOnly, async (req, res) => {
   try {
     const configRes = await query(
       `SELECT * FROM notifications_config 
-       WHERE school_id = $1 AND template_type = 'fees_reminder'`,
+       WHERE school_id = ? AND template_type = 'fees_reminder'`,
       [school_id]
     );
 
@@ -214,11 +220,11 @@ router.post('/api/fees/send-reminders', adminOnly, async (req, res) => {
     // Get reminder configuration
     const configRes = await query(
       `SELECT * FROM notifications_config 
-       WHERE school_id = $1 AND template_type = 'fees_reminder' AND is_enabled = true`,
+       WHERE school_id = ? AND template_type = 'fees_reminder' AND is_enabled = true`,
       [school_id]
     );
 
-    if (configRes.rowCount === 0) {
+    if (configRes.rows.length === 0) {
       return res.status(400).json({ error: 'not_configured', message: 'Fee reminder not configured' });
     }
 
@@ -230,11 +236,11 @@ router.post('/api/fees/send-reminders', adminOnly, async (req, res) => {
       `SELECT s.id, s.full_name, s.parent_phone, sf.balance, sf.term
        FROM students s
        JOIN student_fees sf ON s.id = sf.student_id
-       WHERE s.school_id = $1 
+       WHERE s.school_id = ? 
        AND sf.balance > 0 
        AND s.status = 'active'
        AND s.parent_phone IS NOT NULL
-       AND sf.created_at <= NOW() - INTERVAL '1 day' * $2`,
+       AND sf.created_at <= DATE_SUB(NOW(), INTERVAL ? DAY)`,
       [school_id, timeLimitDays]
     );
 
@@ -255,7 +261,7 @@ router.post('/api/fees/send-reminders', adminOnly, async (req, res) => {
         await query(
           `INSERT INTO fee_reminders 
            (school_id, student_id, message_sent, phone_number, channel, status, reminder_type)
-           VALUES ($1, $2, $3, $4, $5, 'sent', 'automatic')`,
+           VALUES (?, ?, ?, ?, ?, 'sent', 'automatic')`,
           [school_id, student.id, message, student.parent_phone, config.channel]
         );
         sentCount++;
@@ -263,7 +269,7 @@ router.post('/api/fees/send-reminders', adminOnly, async (req, res) => {
         await query(
           `INSERT INTO fee_reminders 
            (school_id, student_id, message_sent, phone_number, channel, status, reminder_type)
-           VALUES ($1, $2, $3, $4, $5, 'failed', 'automatic')`,
+           VALUES (?, ?, ?, ?, ?, 'failed', 'automatic')`,
           [school_id, student.id, message, student.parent_phone, config.channel]
         );
         failedCount++;
@@ -274,7 +280,7 @@ router.post('/api/fees/send-reminders', adminOnly, async (req, res) => {
       message: 'Fee reminders sent',
       sent: sentCount,
       failed: failedCount,
-      total: studentsRes.rowCount
+      total: studentsRes.rows.length
     });
   } catch (err) {
     console.error('Send reminders error:', err);
@@ -291,7 +297,7 @@ router.get('/api/fees/reminders-history', adminOnly, async (req, res) => {
       `SELECT fr.*, s.full_name, s.roll_number 
        FROM fee_reminders fr
        JOIN students s ON fr.student_id = s.id
-       WHERE fr.school_id = $1
+       WHERE fr.school_id = ?
        ORDER BY fr.sent_at DESC
        LIMIT 100`,
       [school_id]
@@ -313,13 +319,13 @@ router.get('/api/students/alumni', adminOnly, async (req, res) => {
     let sql = `
       SELECT id, full_name, roll_number, class_name, graduation_date, parent_name, parent_phone
       FROM students
-      WHERE school_id = $1 AND status IN ('graduated', 'transferred', 'dropped')
+      WHERE school_id = ? AND status IN ('graduated', 'transferred', 'dropped')
     `;
     const params = [school_id];
 
     if (search) {
-      sql += ` AND full_name ILIKE $2`;
-      params.push(`%${search}%`);
+      sql += ` AND LOWER(full_name) LIKE LOWER(?)`;
+      params.push(`%${search.toLowerCase()}%`);
     }
 
     sql += ` ORDER BY graduation_date DESC`;

@@ -29,10 +29,10 @@ router.get('/api/attendance/:date', teacherOrAdmin, async (req, res) => {
     if (role === 'teacher') {
       const verifyRes = await query(
         `SELECT id FROM teacher_assignments 
-         WHERE teacher_id = $1 AND subject_id = $2 AND class_id = $3`,
+         WHERE teacher_id = ? AND subject_id = ? AND class_id = ?`,
         [userId, subject_id, class_id]
       );
-      if (verifyRes.rowCount === 0) {
+      if (verifyRes.rows.length === 0) {
         return res.status(403).json({ error: 'forbidden', message: 'You do not teach this class/subject' });
       }
     }
@@ -46,9 +46,9 @@ router.get('/api/attendance/:date', teacherOrAdmin, async (req, res) => {
        FROM students s
        JOIN classes c ON s.class_name = c.class_name AND s.school_id = c.school_id
        JOIN class_subjects cs ON c.id = cs.class_id
-       LEFT JOIN attendance a ON s.id = a.student_id AND a.date = $1
-       WHERE c.id = $2
-       AND cs.subject_id = $3
+       LEFT JOIN attendance a ON s.id = a.student_id AND a.date = ?
+       WHERE c.id = ?
+       AND cs.subject_id = ?
        AND s.status = 'active'
        ORDER BY s.full_name`,
       [date, class_id, subject_id]
@@ -77,24 +77,27 @@ router.post('/api/attendance', teacherOrAdmin, async (req, res) => {
         `SELECT 1 FROM students s
          JOIN classes c ON s.class_name = c.class_name AND s.school_id = c.school_id
          JOIN teacher_assignments ta ON c.id = ta.class_id
-         WHERE s.id = $1 AND ta.teacher_id = $2`,
+         WHERE s.id = ? AND ta.teacher_id = ?`,
         [student_id, userId]
       );
-      if (verifyRes.rowCount === 0) {
+      if (verifyRes.rows.length === 0) {
         return res.status(403).json({ error: 'forbidden', message: 'You cannot mark this student' });
       }
     }
 
-    const result = await query(
+    await query(
       `INSERT INTO attendance (student_id, date, status, marked_by)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (student_id, date) 
-       DO UPDATE SET status = $3, marked_by = $4, created_at = CURRENT_TIMESTAMP
-       RETURNING *`,
-      [student_id, date, status, userId]
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE status = ?, marked_by = ?, created_at = CURRENT_TIMESTAMP`,
+      [student_id, date, status, userId, status, userId]
     );
 
-    res.json({ message: 'Attendance recorded', attendance: result.rows[0] });
+    const attendanceRes = await query(
+      'SELECT * FROM attendance WHERE student_id = ? AND date = ?',
+      [student_id, date]
+    );
+
+    res.json({ message: 'Attendance recorded', attendance: attendanceRes.rows[0] });
   } catch (err) {
     console.error('Mark attendance error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
@@ -111,7 +114,7 @@ router.get('/api/attendance/student/:studentId', async (req, res) => {
         status,
         COUNT(*) as count
        FROM attendance
-       WHERE student_id = $1
+       WHERE student_id = ?
        GROUP BY status`,
       [studentId]
     );
@@ -149,12 +152,12 @@ router.get('/api/attendance/range', teacherOrAdmin, async (req, res) => {
         a.*, s.full_name, s.roll_number
       FROM attendance a
       JOIN students s ON a.student_id = s.id
-      WHERE a.date BETWEEN $1 AND $2
+      WHERE a.date BETWEEN ? AND ?
     `;
     const params = [start_date, end_date];
 
     if (student_id) {
-      sql += ` AND a.student_id = $3`;
+      sql += ` AND a.student_id = ?`;
       params.push(student_id);
     }
 

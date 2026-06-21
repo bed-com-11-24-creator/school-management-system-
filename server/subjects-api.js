@@ -20,7 +20,7 @@ router.get('/api/subjects', async (req, res) => {
 
   try {
     const subjectsRes = await query(
-      'SELECT * FROM subjects WHERE school_id = $1 ORDER BY subject_name',
+      'SELECT * FROM subjects WHERE school_id = ? ORDER BY subject_name',
       [school_id]
     );
     res.json({ subjects: subjectsRes.rows });
@@ -41,18 +41,21 @@ router.post('/api/subjects', adminOnly, async (req, res) => {
 
   try {
     const result = await query(
-      `INSERT INTO subjects (school_id, subject_name)
-       VALUES ($1, $2)
-       ON CONFLICT (school_id, subject_name) DO NOTHING
-       RETURNING *`,
+      `INSERT IGNORE INTO subjects (school_id, subject_name)
+       VALUES (?, ?)`,
       [school_id, subject_name]
     );
 
-    if (result.rowCount === 0) {
+    if (result.meta.affectedRows === 0) {
       return res.status(409).json({ error: 'conflict', message: 'Subject already exists' });
     }
 
-    res.status(201).json({ subject: result.rows[0] });
+    const subjectRes = await query(
+      'SELECT * FROM subjects WHERE school_id = ? AND subject_name = ?',
+      [school_id, subject_name]
+    );
+
+    res.status(201).json({ subject: subjectRes.rows[0] });
   } catch (err) {
     console.error('Create subject error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
@@ -73,9 +76,8 @@ async function ensureDefaultClasses(schoolId) {
   ];
   for (const name of targetClasses) {
     await query(
-      `INSERT INTO classes (school_id, class_name, fee_amount)
-       VALUES ($1, $2, 0.00)
-       ON CONFLICT (school_id, class_name) DO NOTHING`,
+      `INSERT IGNORE INTO classes (school_id, class_name, fee_amount)
+       VALUES (?, ?, 0.00)`,
       [schoolId, name]
     );
   }
@@ -88,7 +90,7 @@ router.get('/api/classes', async (req, res) => {
   try {
     await ensureDefaultClasses(school_id);
     const classesRes = await query(
-      'SELECT * FROM classes WHERE school_id = $1',
+      'SELECT * FROM classes WHERE school_id = ?',
       [school_id]
     );
     
@@ -119,18 +121,21 @@ router.post('/api/classes', adminOnly, async (req, res) => {
 
   try {
     const result = await query(
-      `INSERT INTO classes (school_id, class_name)
-       VALUES ($1, $2)
-       ON CONFLICT (school_id, class_name) DO NOTHING
-       RETURNING *`,
+      `INSERT IGNORE INTO classes (school_id, class_name)
+       VALUES (?, ?)`,
       [school_id, class_name]
     );
 
-    if (result.rowCount === 0) {
+    if (result.meta.affectedRows === 0) {
       return res.status(409).json({ error: 'conflict', message: 'Class already exists' });
     }
 
-    res.status(201).json({ class: result.rows[0] });
+    const classRes = await query(
+      'SELECT * FROM classes WHERE school_id = ? AND class_name = ?',
+      [school_id, class_name]
+    );
+
+    res.status(201).json({ class: classRes.rows[0] });
   } catch (err) {
     console.error('Create class error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
@@ -153,20 +158,19 @@ router.post('/api/students/:studentId/subjects', adminOnly, async (req, res) => 
 
   try {
     // Verify student exists
-    const studentRes = await query('SELECT id FROM students WHERE id = $1 AND school_id = $2', [studentId, school_id]);
-    if (studentRes.rowCount === 0) {
+    const studentRes = await query('SELECT id FROM students WHERE id = ? AND school_id = ?', [studentId, school_id]);
+    if (studentRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student not found' });
     }
 
     // First, delete existing registrations
-    await query('DELETE FROM student_subjects WHERE student_id = $1', [studentId]);
+    await query('DELETE FROM student_subjects WHERE student_id = ?', [studentId]);
 
     // Insert new registrations
     for (const subjectId of subject_ids) {
       await query(
-        `INSERT INTO student_subjects (student_id, subject_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
+        `INSERT IGNORE INTO student_subjects (student_id, subject_id)
+         VALUES (?, ?)`,
         [studentId, subjectId]
       );
     }
@@ -189,7 +193,7 @@ router.get('/api/students/:studentId/subjects', async (req, res) => {
        JOIN class_subjects cs ON s.id = cs.subject_id
        JOIN classes c ON cs.class_id = c.id
        JOIN students st ON c.class_name = st.class_name AND c.school_id = st.school_id
-       WHERE st.id = $1 AND st.school_id = $2
+       WHERE st.id = ? AND st.school_id = ?
        ORDER BY s.subject_name`,
       [studentId, school_id]
     );
@@ -218,23 +222,22 @@ router.post('/api/teachers/:teacherId/assign', adminOnly, async (req, res) => {
   try {
     // Verify teacher exists in this school
     const teacherRes = await query(
-      'SELECT id FROM users WHERE id = $1 AND school_id = $2 AND role = $3',
+      'SELECT id FROM users WHERE id = ? AND school_id = ? AND role = ?',
       [teacherId, school_id, 'teacher']
     );
-    if (teacherRes.rowCount === 0) {
+    if (teacherRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Teacher not found' });
     }
 
     // Delete existing assignments
-    await query('DELETE FROM teacher_assignments WHERE teacher_id = $1', [teacherId]);
+    await query('DELETE FROM teacher_assignments WHERE teacher_id = ?', [teacherId]);
 
     // Add new assignments
     for (const assignment of assignments) {
       const { subject_id, class_id } = assignment;
       await query(
-        `INSERT INTO teacher_assignments (teacher_id, subject_id, class_id)
-         VALUES ($1, $2, $3)
-         ON CONFLICT DO NOTHING`,
+        `INSERT IGNORE INTO teacher_assignments (teacher_id, subject_id, class_id)
+         VALUES (?, ?, ?)`,
         [teacherId, subject_id, class_id]
       );
     }
@@ -255,15 +258,15 @@ router.get('/api/class-subjects/:classId', async (req, res) => {
   const { classId } = req.params;
 
   try {
-    const classRes = await query('SELECT * FROM classes WHERE id = $1', [classId]);
-    if (classRes.rowCount === 0) {
+    const classRes = await query('SELECT * FROM classes WHERE id = ?', [classId]);
+    if (classRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Class not found' });
     }
 
     const subjectsRes = await query(
       `SELECT s.id, s.subject_name FROM subjects s
        JOIN class_subjects cs ON s.id = cs.subject_id
-       WHERE cs.class_id = $1
+       WHERE cs.class_id = ?
        ORDER BY s.subject_name`,
       [classId]
     );
@@ -286,14 +289,16 @@ router.post('/api/class-subjects/:classId', adminOnly, async (req, res) => {
 
   try {
     const result = await query(
-      `INSERT INTO class_subjects (class_id, subject_id)
-       VALUES ($1, $2)
-       ON CONFLICT (class_id, subject_id) DO NOTHING
-       RETURNING *`,
+      `INSERT IGNORE INTO class_subjects (class_id, subject_id)
+       VALUES (?, ?)`,
       [classId, subject_id]
     );
 
-    res.status(201).json({ message: 'Subject added to class', subject: result.rows[0] });
+    if (result.meta.affectedRows === 0) {
+      return res.status(409).json({ error: 'conflict', message: 'Subject already assigned to class' });
+    }
+
+    res.status(201).json({ message: 'Subject added to class' });
   } catch (err) {
     console.error('Add class subject error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
@@ -306,7 +311,7 @@ router.delete('/api/class-subjects/:classId/:subjectId', adminOnly, async (req, 
 
   try {
     const result = await query(
-      'DELETE FROM class_subjects WHERE class_id = $1 AND subject_id = $2',
+      'DELETE FROM class_subjects WHERE class_id = ? AND subject_id = ?',
       [classId, subjectId]
     );
 
@@ -329,15 +334,15 @@ router.delete('/api/teachers/:teacherId', adminOnly, async (req, res) => {
   try {
     // Verify teacher exists and belongs to school
     const teacherRes = await query(
-      'SELECT id FROM users WHERE id = $1 AND school_id = $2 AND role = $3',
+      'SELECT id FROM users WHERE id = ? AND school_id = ? AND role = ?',
       [teacherId, school_id, 'teacher']
     );
-    if (teacherRes.rowCount === 0) {
+    if (teacherRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Teacher not found' });
     }
 
     // Delete teacher (cascades to assignments, attendance records, etc.)
-    await query('DELETE FROM users WHERE id = $1', [teacherId]);
+    await query('DELETE FROM users WHERE id = ?', [teacherId]);
 
     res.json({ message: 'Teacher deleted successfully' });
   } catch (err) {
@@ -356,7 +361,7 @@ router.get('/api/teachers/:teacherId/assignments', async (req, res) => {
        FROM teacher_assignments ta
        JOIN subjects s ON ta.subject_id = s.id
        JOIN classes c ON ta.class_id = c.id
-       WHERE ta.teacher_id = $1
+       WHERE ta.teacher_id = ?
        ORDER BY c.class_name, s.subject_name`,
       [teacherId]
     );
@@ -374,7 +379,7 @@ router.get('/api/class-rosters', adminOnly, async (req, res) => {
 
   try {
     const classesRes = await query(
-      'SELECT id, class_name FROM classes WHERE school_id = $1 ORDER BY class_name',
+      'SELECT id, class_name FROM classes WHERE school_id = ? ORDER BY class_name',
       [school_id]
     );
 
@@ -385,7 +390,7 @@ router.get('/api/class-rosters', adminOnly, async (req, res) => {
        JOIN classes c ON cs.class_id = c.id
        JOIN students st ON c.class_name = st.class_name AND c.school_id = st.school_id
        JOIN subjects subj ON cs.subject_id = subj.id
-       WHERE st.school_id = $1 AND st.status = 'active'
+       WHERE st.school_id = ? AND st.status = 'active'
        ORDER BY st.class_name, subj.subject_name, st.full_name`,
       [school_id]
     );
@@ -396,7 +401,7 @@ router.get('/api/class-rosters', adminOnly, async (req, res) => {
        FROM teacher_assignments ta
        JOIN subjects subj ON ta.subject_id = subj.id
        JOIN users u ON ta.teacher_id = u.id
-       WHERE u.school_id = $1
+       WHERE u.school_id = ?
        ORDER BY ta.class_id, subj.subject_name`,
       [school_id]
     );
@@ -488,10 +493,10 @@ router.get('/api/teachers/:teacherId/students', async (req, res) => {
        FROM students s
        JOIN classes c ON s.class_name = c.class_name AND s.school_id = c.school_id
        JOIN class_subjects cs ON c.id = cs.class_id
-       WHERE c.id = $1
-       AND cs.subject_id = $2
+       WHERE c.id = ?
+       AND cs.subject_id = ?
        AND s.status = 'active'
-       AND s.school_id = (SELECT school_id FROM users WHERE id = $3)
+       AND s.school_id = (SELECT school_id FROM users WHERE id = ?)
        ORDER BY s.full_name`,
       [class_id, subject_id, teacherId]
     );
@@ -526,7 +531,8 @@ router.get('/api/teachers', async (req, res) => {
         u.created_at,
         -- Distinct assignments list
         COALESCE(
-          (SELECT STRING_AGG(DISTINCT CONCAT(sub.subject_name, ' - ', cl.class_name), ', ')
+          (SELECT COALESCE(GROUP_CONCAT(DISTINCT CONCAT(sub.subject_name, ' - ', cl.class_name)
+            ORDER BY CONCAT(sub.subject_name, ' - ', cl.class_name) SEPARATOR ', '), 'None')
            FROM teacher_assignments ta
            JOIN subjects sub ON ta.subject_id = sub.id
            JOIN classes cl ON ta.class_id = cl.id
@@ -535,20 +541,18 @@ router.get('/api/teachers', async (req, res) => {
         ) as assignments_list,
         -- Distinct classes array
         COALESCE(
-          (SELECT JSON_AGG(DISTINCT cl.class_name)
+          (SELECT JSON_ARRAYAGG(DISTINCT cl.class_name)
            FROM teacher_assignments ta
            JOIN classes cl ON ta.class_id = cl.id
            WHERE ta.teacher_id = u.id),
-          '[]'::json
-        ) as assigned_classes,
+          JSON_ARRAY()) as assigned_classes,
         -- Distinct subjects array
         COALESCE(
-          (SELECT JSON_AGG(DISTINCT sub.subject_name)
+          (SELECT JSON_ARRAYAGG(DISTINCT sub.subject_name)
            FROM teacher_assignments ta
            JOIN subjects sub ON ta.subject_id = sub.id
            WHERE ta.teacher_id = u.id),
-          '[]'::json
-        ) as assigned_subjects,
+          JSON_ARRAY()) as assigned_subjects,
         -- Number of students in assigned classes
         (SELECT COUNT(DISTINCT s.id) 
          FROM students s
@@ -575,13 +579,13 @@ router.get('/api/teachers', async (req, res) => {
          WHERE cl.id IN (SELECT class_id FROM teacher_assignments WHERE teacher_id = u.id)
          AND a.date = CURRENT_DATE AND a.status = 'late') as attendance_late
       FROM users u
-      WHERE u.school_id = $1 AND u.role = 'teacher'
+      WHERE u.school_id = ? AND u.role = 'teacher'
     `;
     const params = [school_id];
 
     if (search) {
-      sql += ` AND (u.full_name ILIKE $2 OR u.email ILIKE $2)`;
-      params.push(`%${search}%`);
+      sql += ` AND (LOWER(u.full_name) LIKE LOWER(?) OR LOWER(u.email) LIKE LOWER(?))`;
+      params.push(`%${search.toLowerCase()}%`, `%${search.toLowerCase()}%`);
     }
 
     sql += ` ORDER BY u.full_name`;
@@ -606,12 +610,12 @@ router.get('/api/teachers/search', adminOnly, async (req, res) => {
   try {
     const teachersRes = await query(
       `SELECT id, full_name, email, created_at FROM users
-       WHERE school_id = $1 
+       WHERE school_id = ?
        AND role = 'teacher'
-       AND (full_name ILIKE $2 OR email ILIKE $2)
+       AND (LOWER(full_name) LIKE LOWER(?) OR LOWER(email) LIKE LOWER(?))
        ORDER BY full_name
        LIMIT 20`,
-      [school_id, `%${q}%`]
+      [school_id, `%${q.toLowerCase()}%`, `%${q.toLowerCase()}%`]
     );
 
     res.json({ teachers: teachersRes.rows });
@@ -619,6 +623,8 @@ router.get('/api/teachers/search', adminOnly, async (req, res) => {
     console.error('Search teacher error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
   }
+});
+});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -632,7 +638,7 @@ router.get('/api/classes-with-fees', async (req, res) => {
   try {
     await ensureDefaultClasses(school_id);
     const classesRes = await query(
-      'SELECT id, class_name, fee_amount FROM classes WHERE school_id = $1',
+      'SELECT id, class_name, fee_amount FROM classes WHERE school_id = ?',
       [school_id]
     );
 
@@ -664,15 +670,16 @@ router.post('/api/class-fees/:classId', adminOnly, async (req, res) => {
 
   try {
     const result = await query(
-      'UPDATE classes SET fee_amount = $1 WHERE id = $2 AND school_id = $3 RETURNING *',
+      'UPDATE classes SET fee_amount = ? WHERE id = ? AND school_id = ?',
       [parseFloat(fee_amount), classId, school_id]
     );
 
-    if (result.rows.length === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Class not found' });
     }
 
-    res.json(result.rows[0]);
+    const classRes = await query('SELECT * FROM classes WHERE id = ? AND school_id = ?', [classId, school_id]);
+    res.json(classRes.rows[0]);
   } catch (err) {
     console.error('Update class fee error:', err);
     res.status(500).json({ error: 'server_error', message: err.message });
@@ -692,7 +699,7 @@ router.post('/api/class-fees/bulk', adminOnly, async (req, res) => {
     await query('BEGIN');
     for (const f of fees) {
       await query(
-        'UPDATE classes SET fee_amount = $1 WHERE id = $2 AND school_id = $3',
+        'UPDATE classes SET fee_amount = ? WHERE id = ? AND school_id = ?',
         [parseFloat(f.fee_amount || 0), f.id, school_id]
       );
     }

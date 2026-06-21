@@ -3,6 +3,7 @@ import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
+import { randomUUID } from 'crypto';
 import { query } from './db.js';
 import { generateTimetable } from './timetable-solver.js';
 import feesAPI from './fees-api.js';
@@ -40,8 +41,8 @@ async function checkLockoutGate(req, res, next) {
     const { school_id, role } = req.user;
 
     // Fetch lock status of the school
-    const schoolRes = await query('SELECT is_locked, balance_due FROM schools WHERE id = $1', [school_id]);
-    if (schoolRes.rowCount === 0) {
+    const schoolRes = await query('SELECT is_locked, balance_due FROM schools WHERE id = ?', [school_id]);
+    if (schoolRes.rows.length === 0) {
       return res.status(404).json({ error: 'school_not_found', message: 'School not found' });
     }
 
@@ -79,11 +80,11 @@ app.post('/api/auth/login', async (req, res) => {
       `SELECT u.*, s.name as school_name, s.is_locked, s.balance_due, s.logo, s.letterhead, s.academic_headers
        FROM users u
        JOIN schools s ON u.school_id = s.id
-       WHERE u.email = $1`,
+       WHERE u.email = ?`,
       [email.toLowerCase().trim()]
     );
 
-    if (userRes.rowCount === 0) {
+    if (userRes.rows.length === 0) {
       return res.status(401).json({ error: 'auth_failed', message: 'Invalid email or password' });
     }
 
@@ -145,18 +146,25 @@ app.post('/api/auth/register-teacher', authenticateToken, async (req, res) => {
   try {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
+    const userId = randomUUID();
+    const normalizedEmail = email.toLowerCase().trim();
 
-    // PostgreSQL unique partial index constraints will throw if trying to add secondary admin/headteacher
-    const insertRes = await query(
-      `INSERT INTO users (school_id, email, password_hash, role, full_name, sex)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, email, role, full_name, sex`,
-      [school_id, email.toLowerCase().trim(), passwordHash, role, full_name, sex || 'M']
+    await query(
+      `INSERT INTO users (id, school_id, email, password_hash, role, full_name, sex)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [userId, school_id, normalizedEmail, passwordHash, role, full_name, sex || 'M']
     );
 
     res.status(201).json({
       message: 'User registered successfully',
-      user: insertRes.rows[0]
+      user: {
+        id: userId,
+        school_id,
+        email: normalizedEmail,
+        role,
+        full_name,
+        sex: sex || 'M'
+      }
     });
   } catch (err) {
     console.error('Register user error:', err);
@@ -179,10 +187,10 @@ app.get('/api/school/branding', authenticateToken, async (req, res) => {
   const { school_id } = req.user;
   try {
     const schoolRes = await query(
-      'SELECT name, logo, letterhead, academic_headers FROM schools WHERE id = $1',
+      'SELECT name, logo, letterhead, academic_headers FROM schools WHERE id = ?',
       [school_id]
     );
-    if (schoolRes.rowCount === 0) {
+    if (schoolRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'School not found' });
     }
     res.json(schoolRes.rows[0]);
@@ -204,12 +212,12 @@ app.post('/api/school/branding', authenticateToken, async (req, res) => {
   try {
     await query(
       `UPDATE schools 
-       SET name = COALESCE($1, name), 
-           logo = COALESCE($2, logo), 
-           letterhead = COALESCE($3, letterhead), 
-           academic_headers = COALESCE($4, academic_headers),
+       SET name = COALESCE(?, name), 
+           logo = COALESCE(?, logo), 
+           letterhead = COALESCE(?, letterhead), 
+           academic_headers = COALESCE(?, academic_headers),
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $5`,
+       WHERE id = ?`,
       [name, logo, letterhead, academic_headers ? JSON.stringify(academic_headers) : null, school_id]
     );
     res.json({ message: 'Branding updated successfully' });
@@ -230,11 +238,11 @@ app.get('/api/billing/status', authenticateToken, async (req, res) => {
 
   try {
     const schoolRes = await query(
-      'SELECT student_count, balance_due, payment_status, is_locked FROM schools WHERE id = $1',
+      'SELECT student_count, balance_due, payment_status, is_locked FROM schools WHERE id = ?',
       [school_id]
     );
     const transactionsRes = await query(
-      'SELECT * FROM transactions WHERE school_id = $1 ORDER BY created_at DESC LIMIT 10',
+      'SELECT * FROM transactions WHERE school_id = ? ORDER BY created_at DESC LIMIT 10',
       [school_id]
     );
     res.json({
@@ -268,7 +276,7 @@ app.post('/api/billing/pay', authenticateToken, async (req, res) => {
     // Insert simulated transaction
     await query(
       `INSERT INTO transactions (school_id, amount, gateway, phone_number, transaction_ref, status)
-       VALUES ($1, $2, $3, $4, $5, 'SUCCESS')`,
+       VALUES (?, ?, ?, ?, ?, 'SUCCESS')`,
       [school_id, amount, gateway, phone_number, ref]
     );
 
@@ -279,7 +287,7 @@ app.post('/api/billing/pay', authenticateToken, async (req, res) => {
            payment_status = 'PAID', 
            is_locked = FALSE,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
+       WHERE id = ?`,
       [school_id]
     );
 
@@ -304,7 +312,7 @@ app.get('/api/students', authenticateToken, checkLockoutGate, async (req, res) =
   const { school_id } = req.user;
   try {
     // Get active term
-    const schoolRes = await query('SELECT academic_headers FROM schools WHERE id = $1', [school_id]);
+    const schoolRes = await query('SELECT academic_headers FROM schools WHERE id = ?', [school_id]);
     const schoolHeaders = schoolRes.rows[0]?.academic_headers || {};
     const term = req.query.term || schoolHeaders.term || 'Term 1 2026';
 
@@ -316,8 +324,8 @@ app.get('/api/students', authenticateToken, checkLockoutGate, async (req, res) =
               COALESCE(sf.status, 'pending') as fee_status
        FROM students s
        LEFT JOIN classes c ON s.class_name = c.class_name AND c.school_id = s.school_id
-       LEFT JOIN student_fees sf ON s.id = sf.student_id AND sf.term = $2
-       WHERE s.school_id = $1 
+       LEFT JOIN student_fees sf ON s.id = sf.student_id AND sf.term = ?
+       WHERE s.school_id = ? 
        ORDER BY s.class_name ASC, s.full_name ASC`,
       [school_id, term]
     );
@@ -346,47 +354,45 @@ app.post('/api/students', authenticateToken, checkLockoutGate, async (req, res) 
   try {
     await query('BEGIN');
 
-    // Insert student
-    const studentRes = await query(
-      `INSERT INTO students (school_id, full_name, roll_number, class_name, sex, disability, parent_name, parent_phone)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [school_id, full_name, roll_number, class_name, sex || 'M', disability || null, parent_name, parent_phone]
+    const studentId = randomUUID();
+    await query(
+      `INSERT INTO students (id, school_id, full_name, roll_number, class_name, sex, disability, parent_name, parent_phone)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [studentId, school_id, full_name, roll_number, class_name, sex || 'M', disability || null, parent_name, parent_phone]
     );
 
-    const student = studentRes.rows[0];
-
     // Get active term
-    const schoolRes = await query('SELECT academic_headers FROM schools WHERE id = $1', [school_id]);
+    const schoolRes = await query('SELECT academic_headers FROM schools WHERE id = ?', [school_id]);
     const schoolHeaders = schoolRes.rows[0]?.academic_headers || {};
     const term = schoolHeaders.term || 'Term 1 2026';
 
     // Get class fee amount
-    const classRes = await query('SELECT fee_amount FROM classes WHERE school_id = $1 AND class_name = $2', [school_id, class_name]);
-    const feeAmount = classRes.rowCount > 0 ? parseFloat(classRes.rows[0].fee_amount) : 0.00;
+    const classRes = await query('SELECT fee_amount FROM classes WHERE school_id = ? AND class_name = ?', [school_id, class_name]);
+    const feeAmount = classRes.rows.length > 0 ? parseFloat(classRes.rows[0].fee_amount) : 0.00;
 
     const paid = parseFloat(amount_paid || 0);
     const balance = feeAmount - paid;
     const feeStatus = balance <= 0 ? 'paid' : 'pending';
 
-    // Insert student fee record
-    const feeRes = await query(
+    await query(
       `INSERT INTO student_fees (student_id, school_id, term, fee_amount, amount_paid, balance, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [student.id, school_id, term, feeAmount, paid, balance, feeStatus]
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [studentId, school_id, term, feeAmount, paid, balance, feeStatus]
     );
 
-    // Increment student count in school
-    const countRes = await query(
+    await query(
       `UPDATE schools 
        SET student_count = student_count + 1,
-           balance_due = (student_count + 1) * 500.00, -- K500 flat rate per student per term
+           balance_due = (student_count + 1) * 500.00,
            payment_status = CASE WHEN (student_count + 1) * 500.00 > 0 THEN 'UNPAID' ELSE 'PAID' END,
-           is_locked = CASE WHEN (student_count + 1) * 500.00 > 0 THEN TRUE ELSE FALSE END, -- Demo trigger: lock upon new unbilled students
+           is_locked = CASE WHEN (student_count + 1) * 500.00 > 0 THEN TRUE ELSE FALSE END,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1
-       RETURNING student_count, balance_due`,
+       WHERE id = ?`,
+      [school_id]
+    );
+
+    const schoolBillingRes = await query(
+      'SELECT student_count, balance_due, payment_status, is_locked FROM schools WHERE id = ?',
       [school_id]
     );
 
@@ -394,13 +400,21 @@ app.post('/api/students', authenticateToken, checkLockoutGate, async (req, res) 
 
     res.status(201).json({
       student: {
-        ...student,
+        id: studentId,
+        school_id,
+        full_name,
+        roll_number,
+        class_name,
+        sex: sex || 'M',
+        disability,
+        parent_name,
+        parent_phone,
         fee_amount: feeAmount,
         amount_paid: paid,
-        balance: balance,
+        balance,
         fee_status: feeStatus
       },
-      billing: countRes.rows[0]
+      billing: schoolBillingRes.rows[0]
     });
   } catch (err) {
     await query('ROLLBACK');
@@ -424,32 +438,31 @@ app.delete('/api/students/:id', authenticateToken, checkLockoutGate, async (req,
   try {
     await query('BEGIN');
 
-    // Delete student
-    const deleteRes = await query('DELETE FROM students WHERE id = $1 AND school_id = $2 RETURNING id', [studentId, school_id]);
+    const deleteRes = await query('DELETE FROM students WHERE id = ? AND school_id = ?', [studentId, school_id]);
 
     if (deleteRes.rowCount === 0) {
       await query('ROLLBACK');
       return res.status(404).json({ error: 'not_found', message: 'Student not found' });
     }
 
-    // Decrement student count and update balance due
-    const countRes = await query(
+    await query(
       `UPDATE schools 
        SET student_count = GREATEST(0, student_count - 1),
            balance_due = GREATEST(0, student_count - 1) * 500.00,
            payment_status = CASE WHEN GREATEST(0, student_count - 1) * 500.00 > 0 THEN payment_status ELSE 'PAID' END,
            is_locked = CASE WHEN GREATEST(0, student_count - 1) * 500.00 > 0 THEN is_locked ELSE FALSE END,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1
-       RETURNING student_count, balance_due`,
+       WHERE id = ?`,
       [school_id]
     );
+
+    const schoolBillingRes = await query('SELECT student_count, balance_due, payment_status, is_locked FROM schools WHERE id = ?', [school_id]);
 
     await query('COMMIT');
 
     res.json({
       message: 'Student deleted successfully',
-      billing: countRes.rows[0]
+      billing: schoolBillingRes.rows[0]
     });
   } catch (err) {
     await query('ROLLBACK');
@@ -472,7 +485,7 @@ app.get('/api/attendance', authenticateToken, checkLockoutGate, async (req, res)
       `SELECT a.*, s.full_name, s.roll_number, s.class_name
        FROM attendance a
        JOIN students s ON a.student_id = s.id
-       WHERE s.school_id = $1 AND a.date = $2`,
+       WHERE s.school_id = ? AND a.date = ?`,
       [school_id, date]
     );
     res.json(attendanceRes.rows);
@@ -495,7 +508,7 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
 
   try {
     // Check if student belongs to this school
-    const studentCheck = await query('SELECT full_name, parent_phone, parent_name FROM students WHERE id = $1 AND school_id = $2', [student_id, school_id]);
+    const studentCheck = await query('SELECT full_name, parent_phone, parent_name FROM students WHERE id = ? AND school_id = ?', [student_id, school_id]);
     if (studentCheck.rowCount === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student not found in this school' });
     }
@@ -503,26 +516,25 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
     // UPSERT attendance
     await query(
       `INSERT INTO attendance (student_id, date, status, marked_by)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (student_id, date)
-       DO UPDATE SET status = EXCLUDED.status, marked_by = EXCLUDED.marked_by`,
-      [student_id, date, status, userId]
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE status = ?, marked_by = ?`,
+      [student_id, date, status, userId, status, userId]
     );
 
     // Automated trigger: if status is ABSENT, check config and queue SMS
     if (status === 'absent') {
       const configRes = await query(
         `SELECT message_template, is_enabled, channel FROM notifications_config 
-         WHERE school_id = $1 AND template_type = 'attendance_alert'`,
+         WHERE school_id = ? AND template_type = 'attendance_alert'`,
         [school_id]
       );
 
       const stud = studentCheck.rows[0];
-      if (configRes.rowCount > 0 && configRes.rows[0].is_enabled && stud.parent_phone) {
+      if (configRes.rows.length > 0 && configRes.rows[0].is_enabled && stud.parent_phone) {
         const conf = configRes.rows[0];
 
         // Fetch school name
-        const schoolRes = await query('SELECT name FROM schools WHERE id = $1', [school_id]);
+        const schoolRes = await query('SELECT name FROM schools WHERE id = ?', [school_id]);
         const schoolName = schoolRes.rows[0].name;
 
         // Format text
@@ -535,7 +547,7 @@ app.post('/api/attendance', authenticateToken, checkLockoutGate, async (req, res
         // Save to outbox
         await query(
           `INSERT INTO sent_notifications (school_id, student_id, recipient_phone, message_content, channel, status)
-           VALUES ($1, $2, $3, $4, $5, 'SENT')`,
+           VALUES (?, ?, ?, ?, ?, 'SENT')`,
           [school_id, student_id, stud.parent_phone, message, conf.channel]
         );
       }
@@ -562,12 +574,12 @@ app.get('/api/scores', authenticateToken, checkLockoutGate, async (req, res) => 
       SELECT r.*, s.full_name, s.roll_number, s.class_name
       FROM report_cards r
       JOIN students s ON r.student_id = s.id
-      WHERE s.school_id = $1 AND r.term = $2
+      WHERE s.school_id = ? AND r.term = ?
     `;
     const params = [school_id, term];
 
     if (class_name) {
-      q += ` AND s.class_name = $3`;
+      q += ` AND s.class_name = ?`;
       params.push(class_name);
     }
 
@@ -593,22 +605,25 @@ app.post('/api/scores', authenticateToken, checkLockoutGate, async (req, res) =>
 
   try {
     // Verify student belongs to this school
-    const studentCheck = await query('SELECT full_name FROM students WHERE id = $1 AND school_id = $2', [student_id, school_id]);
+    const studentCheck = await query('SELECT full_name FROM students WHERE id = ? AND school_id = ?', [student_id, school_id]);
     if (studentCheck.rowCount === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student not found in school' });
     }
 
     // UPSERT score entry
-    const upsertRes = await query(
+    await query(
       `INSERT INTO report_cards (student_id, term, subject, score, teacher_remarks, headteacher_approved)
-       VALUES ($1, $2, $3, $4, $5, false)
-       ON CONFLICT (student_id, term, subject)
-       DO UPDATE SET score = EXCLUDED.score, teacher_remarks = EXCLUDED.teacher_remarks, headteacher_approved = false, updated_at = CURRENT_TIMESTAMP
-       RETURNING *`,
+       VALUES (?, ?, ?, ?, ?, false)
+       ON DUPLICATE KEY UPDATE score = VALUES(score), teacher_remarks = VALUES(teacher_remarks), headteacher_approved = false, updated_at = CURRENT_TIMESTAMP`,
       [student_id, term, subject, score, remarks]
     );
 
-    res.json({ success: true, report: upsertRes.rows[0] });
+    const reportRes = await query(
+      'SELECT * FROM report_cards WHERE student_id = ? AND term = ? AND subject = ?',
+      [student_id, term, subject]
+    );
+
+    res.json({ success: true, report: reportRes.rows[0] });
   } catch (err) {
     console.error('Enter score error:', err);
     res.status(500).json({ error: 'server_error', message: 'Failed to save score' });
@@ -630,7 +645,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
       const pendingRes = await query(
         `SELECT r.id FROM report_cards r
          JOIN students s ON r.student_id = s.id
-         WHERE s.school_id = $1 AND r.headteacher_approved = false AND r.term = $2`,
+         WHERE s.school_id = ? AND r.headteacher_approved = false AND r.term = ?`,
         [school_id, term || 'Term 2']
       );
       targetIds = pendingRes.rows.map(row => row.id);
@@ -645,38 +660,39 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
   }
 
   try {
+    const placeholders = targetIds.map(() => '?').join(',');
     await query(
       `UPDATE report_cards 
        SET headteacher_approved = true, 
-           approved_by = $1,
+           approved_by = ?,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = ANY($2::uuid[])`,
-      [userId, targetIds]
+       WHERE id IN (${placeholders})`,
+      [userId, ...targetIds]
     );
 
     // Trigger Notifications for approved reports
     // For each student who has newly approved report cards, construct report summary and queue SMS/WhatsApp
-    for (const rid of report_ids) {
+    for (const rid of targetIds) {
       const repRes = await query(
         `SELECT r.term, r.subject, r.score, r.teacher_remarks, s.id as student_id, s.full_name, s.parent_name, s.parent_phone, s.school_id
          FROM report_cards r
          JOIN students s ON r.student_id = s.id
-         WHERE r.id = $1`,
+         WHERE r.id = ?`,
         [rid]
       );
 
-      if (repRes.rowCount > 0) {
+      if (repRes.rows.length > 0) {
         const rep = repRes.rows[0];
         if (rep.parent_phone) {
           const configRes = await query(
             `SELECT message_template, is_enabled, channel FROM notifications_config 
-             WHERE school_id = $1 AND template_type = 'report_card_ready'`,
+             WHERE school_id = ? AND template_type = 'report_card_ready'`,
             [rep.school_id]
           );
 
-          if (configRes.rowCount > 0 && configRes.rows[0].is_enabled) {
+          if (configRes.rows.length > 0 && configRes.rows[0].is_enabled) {
             const conf = configRes.rows[0];
-            const schoolRes = await query('SELECT name FROM schools WHERE id = $1', [rep.school_id]);
+            const schoolRes = await query('SELECT name FROM schools WHERE id = ?', [rep.school_id]);
             const schoolName = schoolRes.rows[0].name;
 
             const scoresDetails = `${rep.subject}: ${rep.score}% (${rep.teacher_remarks || 'No remarks'})`;
@@ -692,7 +708,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
 
             await query(
               `INSERT INTO sent_notifications (school_id, student_id, recipient_phone, message_content, channel, status)
-               VALUES ($1, $2, $3, $4, $5, 'SENT')`,
+               VALUES (?, ?, ?, ?, ?, 'SENT')`,
               [rep.school_id, rep.student_id, rep.parent_phone, message, conf.channel]
             );
           }
@@ -713,7 +729,7 @@ app.post('/api/scores/approve', authenticateToken, checkLockoutGate, async (req,
 app.get('/api/notifications/config', authenticateToken, checkLockoutGate, async (req, res) => {
   const { school_id } = req.user;
   try {
-    const configRes = await query('SELECT * FROM notifications_config WHERE school_id = $1', [school_id]);
+    const configRes = await query('SELECT * FROM notifications_config WHERE school_id = ?', [school_id]);
     res.json(configRes.rows);
   } catch (err) {
     console.error('Get notification config error:', err);
@@ -737,13 +753,12 @@ app.post('/api/notifications/config', authenticateToken, checkLockoutGate, async
     for (const c of configs) {
       await query(
         `INSERT INTO notifications_config (school_id, template_type, message_template, time_limit_days, is_enabled, channel)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (school_id, template_type)
-         DO UPDATE SET message_template = EXCLUDED.message_template,
-                       time_limit_days = EXCLUDED.time_limit_days,
-                       is_enabled = EXCLUDED.is_enabled,
-                       channel = EXCLUDED.channel`,
-        [school_id, c.template_type, c.message_template, c.time_limit_days || 0, c.is_enabled, c.channel || 'sms']
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE message_template = ?,
+                       time_limit_days = ?,
+                       is_enabled = ?,
+                       channel = ?`,
+        [school_id, c.template_type, c.message_template, c.time_limit_days || 0, c.is_enabled, c.channel || 'sms', c.message_template, c.time_limit_days || 0, c.is_enabled, c.channel || 'sms']
       );
     }
     await query('COMMIT');
@@ -767,7 +782,7 @@ app.get('/api/notifications/outbox', authenticateToken, checkLockoutGate, async 
       `SELECT n.*, s.full_name as student_name
        FROM sent_notifications n
        LEFT JOIN students s ON n.student_id = s.id
-       WHERE n.school_id = $1
+       WHERE n.school_id = ?
        ORDER BY n.sent_at DESC LIMIT 50`,
       [school_id]
     );
@@ -793,32 +808,32 @@ app.post('/api/notifications/send', authenticateToken, checkLockoutGate, async (
   try {
     // 1. Fetch template config
     const configRes = await query(
-      'SELECT message_template, channel, is_enabled FROM notifications_config WHERE school_id = $1 AND template_type = $2',
+      'SELECT message_template, channel, is_enabled FROM notifications_config WHERE school_id = ? AND template_type = ?',
       [school_id, template_type]
     );
 
-    if (configRes.rowCount === 0 || !configRes.rows[0].is_enabled) {
+    if (configRes.rows.length === 0 || !configRes.rows[0].is_enabled) {
       return res.status(404).json({ error: 'disabled_or_missing', message: 'Template config is either disabled or not configured.' });
     }
 
     const config = configRes.rows[0];
 
     // 2. Fetch target students
-    let studQuery = 'SELECT id, full_name, parent_name, parent_phone FROM students WHERE school_id = $1';
+    let studQuery = 'SELECT id, full_name, parent_name, parent_phone FROM students WHERE school_id = ?';
     const params = [school_id];
 
     if (class_name) {
-      studQuery += ' AND class_name = $2';
+      studQuery += ' AND class_name = ?';
       params.push(class_name);
     }
 
     const studentsRes = await query(studQuery, params);
-    if (studentsRes.rowCount === 0) {
+    if (studentsRes.rows.length === 0) {
       return res.json({ success: true, count: 0, message: 'No students found in target audience' });
     }
 
     // Fetch school metadata for variables
-    const schoolRes = await query('SELECT name, balance_due FROM schools WHERE id = $1', [school_id]);
+    const schoolRes = await query('SELECT name, balance_due FROM schools WHERE id = ?', [school_id]);
     const school = schoolRes.rows[0];
 
     let sentCount = 0;
@@ -835,7 +850,7 @@ app.post('/api/notifications/send', authenticateToken, checkLockoutGate, async (
 
         await query(
           `INSERT INTO sent_notifications (school_id, student_id, recipient_phone, message_content, channel, status)
-           VALUES ($1, $2, $3, $4, $5, 'SENT')`,
+           VALUES (?, ?, ?, ?, ?, 'SENT')`,
           [school_id, stud.id, stud.parent_phone, message, config.channel]
         );
         sentCount++;
@@ -888,11 +903,11 @@ app.get('/api/parent/student/:id', async (req, res) => {
               sc.name as school_name, sc.letterhead
        FROM students s
        JOIN schools sc ON s.school_id = sc.id
-       WHERE s.id = $1`,
+       WHERE s.id = ?`,
       [studentId]
     );
 
-    if (studRes.rowCount === 0) {
+    if (studRes.rows.length === 0) {
       return res.status(404).json({ error: 'not_found', message: 'Student record not found' });
     }
 
@@ -916,8 +931,8 @@ app.post('/api/parent/pay', async (req, res) => {
     await query('BEGIN');
 
     // Fetch student info
-    const studRes = await query('SELECT school_id, full_name FROM students WHERE id = $1', [student_id]);
-    if (studRes.rowCount === 0) {
+    const studRes = await query('SELECT school_id, full_name FROM students WHERE id = ?', [student_id]);
+    if (studRes.rows.length === 0) {
       await query('ROLLBACK');
       return res.status(404).json({ error: 'not_found', message: 'Student not found' });
     }
@@ -928,7 +943,7 @@ app.post('/api/parent/pay', async (req, res) => {
     // Record student transaction
     await query(
       `INSERT INTO transactions (school_id, amount, gateway, phone_number, transaction_ref, status)
-       VALUES ($1, $2, $3, $4, $5, 'SUCCESS')`,
+       VALUES (?, ?, ?, ?, ?, 'SUCCESS')`,
       [schoolId, amount, gateway, phone_number, ref]
     );
 
@@ -939,7 +954,7 @@ app.post('/api/parent/pay', async (req, res) => {
            is_locked = CASE WHEN GREATEST(0.00, balance_due - 500.00) > 0 THEN is_locked ELSE FALSE END,
            payment_status = CASE WHEN GREATEST(0.00, balance_due - 500.00) > 0 THEN payment_status ELSE 'PAID' END,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
+       WHERE id = ?`,
       [schoolId]
     );
 
@@ -975,13 +990,13 @@ app.post('/api/sync', authenticateToken, checkLockoutGate, async (req, res) => {
       if (op.type === 'attendance') {
         const { student_id, date, status } = op.data;
         // Verify student
-        const check = await query('SELECT id FROM students WHERE id = $1 AND school_id = $2', [student_id, school_id]);
+        const check = await query('SELECT id FROM students WHERE id = ? AND school_id = ?', [student_id, school_id]);
         if (check.rowCount > 0) {
           await query(
             `INSERT INTO attendance (student_id, date, status, marked_by)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (student_id, date) DO UPDATE SET status = EXCLUDED.status, marked_by = EXCLUDED.marked_by`,
-            [student_id, date, status, userId]
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE status = ?, marked_by = ?`,
+            [student_id, date, status, userId, status, userId]
           );
           results.succeeded++;
         } else {
@@ -990,14 +1005,13 @@ app.post('/api/sync', authenticateToken, checkLockoutGate, async (req, res) => {
         }
       } else if (op.type === 'score') {
         const { student_id, term, subject, score, remarks } = op.data;
-        const check = await query('SELECT id FROM students WHERE id = $1 AND school_id = $2', [student_id, school_id]);
+        const check = await query('SELECT id FROM students WHERE id = ? AND school_id = ?', [student_id, school_id]);
         if (check.rowCount > 0) {
           await query(
             `INSERT INTO report_cards (student_id, term, subject, score, teacher_remarks, headteacher_approved)
-             VALUES ($1, $2, $3, $4, $5, false)
-             ON CONFLICT (student_id, term, subject)
-             DO UPDATE SET score = EXCLUDED.score, teacher_remarks = EXCLUDED.teacher_remarks, headteacher_approved = false`,
-            [student_id, term, subject, score, remarks]
+             VALUES (?, ?, ?, ?, ?, false)
+             ON DUPLICATE KEY UPDATE score = ?, teacher_remarks = ?, headteacher_approved = false`,
+            [student_id, term, subject, score, remarks, score, remarks]
           );
           results.succeeded++;
         } else {
